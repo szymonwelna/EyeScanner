@@ -6,4 +6,8 @@ imbalanced-learn
 scikit-image
 torch
 torchvision
-torchaudio
+
+# Optional: GPU acceleration via DirectX 12 on any DX12 GPU (Intel iGPU,
+# AMD, NVIDIA). Wheels ship for Python 3.10–3.12 only. The app auto-detects
+# it at startup; if not installed, training runs on the CPU instead.
+# pip install torch-directml

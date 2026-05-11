@@ -8,11 +8,47 @@ Projekt polega na stworzeniu aplikacji desktopowej w Pythonie do automatycznego 
 - Biblioteki: opencv-python, numpy, matplotlib, scikit-learn, imbalanced-learn, scikit-image, torch, torchvision, torchaudio, tkinter
 
 ## Instalacja
-1. Skonfiguruj środowisko Python.
-2. Zainstaluj wymagane pakiety: `pip install opencv-python numpy matplotlib scikit-learn imbalanced-learn scikit-image torch torchvision torchaudio`
+1. Skonfiguruj środowisko Python (3.10–3.13 zalecane).
+2. Zainstaluj wymagane pakiety:
+   ```
+   pip install -r requirements.txt
+   ```
+
+### Opcjonalne wsparcie GPU (DirectML)
+Aplikacja automatycznie wykrywa GPU przy starcie. Kolejność priorytetów:
+**CUDA (NVIDIA) → DirectML (DX12: Intel iGPU / AMD / NVIDIA) → CPU**.
+
+Aby włączyć DirectML (działa na każdej karcie z DirectX 12, w tym Intel UHD,
+Iris Xe, AMD Radeon, NVIDIA):
+
+```
+pip install torch-directml
+```
+
+Wymagania:
+- Windows 10/11
+- **Python 3.10, 3.11 lub 3.12** (na nowsze wersje brak gotowych wheeli)
+- Sterownik GPU z obsługą DirectX 12
+
+Po instalacji uruchom `python main.py` — w konsoli pojawi się
+`[device] using directml (...)`. Jeśli `torch-directml` nie jest
+zainstalowane, aplikacja po cichu wraca do wielowątkowego CPU, więc kod
+działa wszędzie bez zmian.
+
+Aby wymusić CPU mimo zainstalowanego DirectML, odinstaluj pakiet
+(`pip uninstall torch-directml`) lub ustaw `CUDA_VISIBLE_DEVICES=""` przed
+uruchomieniem.
 
 ## Uruchomienie
-Uruchom `main.py` za pomocą Pythona. Aplikacja otworzy okno GUI.
+Uruchom `main.py` za pomocą Pythona. Aplikacja otworzy okno GUI. Po starcie:
+1. **Załaduj obraz** – wybierz plik z `all/images/`.
+2. **Załaduj maskę ekspercką (manual1/)** – wybierz plik z `all/manual1/`
+   (to maska naczyń, *nie* maska FOV z folderu `all/mask/`).
+3. **Przetwórz obraz (baseline)** – CLAHE jest już zastosowane w kroku 1,
+   więc ten przycisk uruchamia tylko Canny + morfologię.
+4. **Trenuj klasyfikator ML** → **Predykcja z ML**.
+5. **Trenuj sieć neuronową** → **Predykcja z NN**.
+6. **Analizuj wyniki** – metryki względem maski eksperckiej.
 
 ## Funkcjonalności
 - Ładowanie obrazu dna oka.

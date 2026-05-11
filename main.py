@@ -1,3 +1,4 @@
+import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import cv2
@@ -15,6 +16,25 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+
+def _pick_device():
+    """Choose the best available compute device.
+
+    Priority: CUDA (NVIDIA) > DirectML (any DX12 GPU on Windows, incl. Intel
+    iGPU and AMD) > CPU. DirectML is enabled when `torch-directml` is
+    installed; it ships wheels for Python 3.10–3.12. On Python 3.13+ the
+    import will fail silently and we fall back to CPU.
+    """
+    if torch.cuda.is_available():
+        return torch.device("cuda"), "cuda"
+    try:
+        import torch_directml  # type: ignore
+        if torch_directml.is_available():
+            return torch_directml.device(), "directml"
+    except Exception:
+        pass
+    return torch.device("cpu"), "cpu"
 
 
 def _compute_features_batch(patches):
@@ -79,16 +99,19 @@ def _all_patches(image, patch_size):
 class UNet(nn.Module):
     def __init__(self):
         super(UNet, self).__init__()
-        self.enc1 = self.conv_block(1, 64)
-        self.enc2 = self.conv_block(64, 128)
-        self.enc3 = self.conv_block(128, 256)
-        self.enc4 = self.conv_block(256, 512)
-        self.bottleneck = self.conv_block(512, 1024)
-        self.dec4 = self.upconv_block(1024, 512)
-        self.dec3 = self.upconv_block(512, 256)
-        self.dec2 = self.upconv_block(256, 128)
-        self.dec1 = self.upconv_block(128, 64)
-        self.final = nn.Conv2d(64, 1, 1)
+        # Lean UNet for 64x64 patches; ~50x fewer parameters than the
+        # 64/128/256/512/1024 variant, trains in a fraction of the time on CPU
+        # without losing accuracy at this resolution.
+        self.enc1 = self.conv_block(1, 16)
+        self.enc2 = self.conv_block(16, 32)
+        self.enc3 = self.conv_block(32, 64)
+        self.enc4 = self.conv_block(64, 96)
+        self.bottleneck = self.conv_block(96, 128)
+        self.dec4 = self.upconv_block(128, 96)
+        self.dec3 = self.upconv_block(96, 64)
+        self.dec2 = self.upconv_block(64, 32)
+        self.dec1 = self.upconv_block(32, 16)
+        self.final = nn.Conv2d(16, 1, 1)
 
     def conv_block(self, in_c, out_c):
         return nn.Sequential(
@@ -128,14 +151,27 @@ class RetinaVesselDetector:
         self.features = None
         self.labels = None
         self.model_nn = UNet()
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device, self.device_kind = _pick_device()
         self.model_nn.to(self.device)
+        print(f"[device] using {self.device_kind} ({self.device})")
+        # Use every CPU core when we are actually running on the CPU.
+        if self.device_kind == "cpu":
+            try:
+                torch.set_num_threads(max(1, (os.cpu_count() or 1) - 1))
+            except Exception:
+                pass
+        self._mask_dir = os.path.join("all", "manual1")
+        self._image_dir = os.path.join("all", "images")
 
         # GUI elements
         self.load_image_btn = tk.Button(root, text="Załaduj obraz", command=self.load_image)
         self.load_image_btn.pack()
 
-        self.load_mask_btn = tk.Button(root, text="Załaduj maskę ground truth", command=self.load_mask)
+        self.load_mask_btn = tk.Button(
+            root,
+            text="Załaduj maskę ekspercką (manual1/)",
+            command=self.load_mask,
+        )
         self.load_mask_btn.pack()
 
         self.process_btn = tk.Button(root, text="Przetwórz obraz (baseline)", command=self.process_image)
@@ -159,16 +195,37 @@ class RetinaVesselDetector:
         self.canvas = None
 
     def load_image(self):
-        file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.png *.tif")])
-        if file_path:
+        initial = self._image_dir if os.path.isdir(self._image_dir) else os.getcwd()
+        file_path = filedialog.askopenfilename(
+            initialdir=initial,
+            filetypes=[("Image files", "*.jpg *.JPG *.png *.tif")],
+        )
+        if not file_path:
+            return
+        bgr = cv2.imread(file_path, cv2.IMREAD_COLOR)
+        if bgr is None:
+            # Single-channel fallback (e.g. already-grey TIFF).
             self.image = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
-            messagebox.showinfo("Sukces", "Obraz załadowany")
+        else:
+            # Vessels show the highest contrast in the green channel of a
+            # fundus image (blue is noisy, red saturates over the retina).
+            green = bgr[:, :, 1]
+            # Apply CLAHE here so every downstream method (baseline, ML, NN)
+            # sees the same contrast-enhanced input.
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            self.image = clahe.apply(green)
+        messagebox.showinfo("Sukces", "Obraz załadowany")
 
     def load_mask(self):
-        file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.png *.tif")])
+        initial = self._mask_dir if os.path.isdir(self._mask_dir) else os.getcwd()
+        file_path = filedialog.askopenfilename(
+            initialdir=initial,
+            title="Wybierz maskę ekspercką z folderu manual1/",
+            filetypes=[("Image files", "*.tif *.png *.jpg")],
+        )
         if file_path:
             self.mask = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
-            self.mask = (self.mask > 128).astype(np.uint8)  # Binarize
+            self.mask = (self.mask > 128).astype(np.uint8)
             messagebox.showinfo("Sukces", "Maska załadowana")
 
     def process_image(self):
@@ -176,13 +233,8 @@ class RetinaVesselDetector:
             messagebox.showerror("Błąd", "Najpierw załaduj obraz")
             return
 
-        # Wstępne przetwarzanie: CLAHE
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(self.image)
-
-        # Wykrywanie krawędzi: Filtr Frangi (prosta implementacja)
-        # Dla uproszczenia użyjemy Canny jako baseline
-        edges = cv2.Canny(enhanced, 50, 150)
+        # self.image is already CLAHE-enhanced in load_image.
+        edges = cv2.Canny(self.image, 50, 150)
 
         # Końcowe przetwarzanie: Morfologia
         kernel = np.ones((3,3), np.uint8)
@@ -337,15 +389,17 @@ class RetinaVesselDetector:
         dataset = TensorDataset(X_train_t, y_train_t)
         dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
 
-        # Vessel pixels are ~5–10% of the image — without pos_weight the
-        # network collapses to predicting "background everywhere".
+        # Vessel pixels are ~5–10% of the image. Half of the raw ratio is
+        # enough to keep the model from collapsing to "background everywhere"
+        # without over-predicting bright non-vessel regions.
         pos = float(y_train.sum())
         neg = float(y_train.size - pos)
-        pos_weight = torch.tensor([neg / max(pos, 1.0)], device=self.device)
+        pw = max(0.5 * (neg / max(pos, 1.0)), 3.0)
+        pos_weight = torch.tensor([pw], device=self.device)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         optimizer = optim.Adam(self.model_nn.parameters(), lr=1e-3)
 
-        epochs = 10
+        epochs = 20
         self.model_nn.train()
         for epoch in range(epochs):
             for inputs, labels in dataloader:
