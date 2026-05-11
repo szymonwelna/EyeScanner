@@ -20,10 +20,6 @@ def _log(msg):
     print(msg, flush=True)
 
 def _compute_features_batch(patches):
-    """Vectorized features per patch: variance + 7 Hu moments.
-
-    patches: (N, P, P) float array.  Returns (N, 8) feature array.
-    """
     p = patches.astype(np.float64)
     n, ph, pw = p.shape
     variance = p.var(axis=(1, 2))
@@ -150,6 +146,14 @@ class RetinaVesselDetector:
         self.ml_accuracy = tk.IntVar(value=1)
         self.ml_accuracy_scale = tk.Scale(root, label="Dokładność ML (1=wysoka, 5=niska)", from_=1, to=5, orient=tk.HORIZONTAL, variable=self.ml_accuracy, length=260)
         self.ml_accuracy_scale.pack()
+
+        self.nn_speed = tk.IntVar(value=1)
+        self.nn_speed_scale = tk.Scale(root, label="Szybkość NN (1=dokładna, 5=szybsza)", from_=1, to=5, orient=tk.HORIZONTAL, variable=self.nn_speed, length=260)
+        self.nn_speed_scale.pack()
+
+        self.nn_pos_weight = tk.DoubleVar(value=1.0)
+        self.nn_pos_weight_scale = tk.Scale(root, label="Waga klasy pozytywnej NN", from_=1.0, to=10.0, resolution=0.5, orient=tk.HORIZONTAL, variable=self.nn_pos_weight, length=260)
+        self.nn_pos_weight_scale.pack()
 
         self.train_nn_btn = tk.Button(root, text="Trenuj sieć neuronową", command=self.train_nn)
         self.train_nn_btn.pack()
@@ -340,6 +344,26 @@ class RetinaVesselDetector:
         X = np.array(X).reshape(-1, 1, patch_size, patch_size).astype(np.float32) / 255.0
         y = np.array(y).reshape(-1, 1, patch_size, patch_size).astype(np.float32)
 
+        speed = self.nn_speed.get()
+        epochs = max(2, 12 - 2 * speed)
+        batch_size = 4 if speed == 1 else 6 if speed == 2 else 8 if speed == 3 else 12 if speed == 4 else 16
+        sample_size = min(X.shape[0], max(800, X.shape[0] // speed))
+        if sample_size < X.shape[0]:
+            patch_scores = y.reshape(y.shape[0], -1).mean(axis=1)
+            pos_idx = np.flatnonzero(patch_scores > 0.01)
+            neg_idx = np.flatnonzero(patch_scores <= 0.01)
+            if len(pos_idx) > 0 and len(neg_idx) > 0:
+                n = min(len(pos_idx), len(neg_idx), sample_size // 2)
+                sel = np.concatenate([
+                    np.random.default_rng(42).choice(pos_idx, size=n, replace=False),
+                    np.random.default_rng(42).choice(neg_idx, size=n, replace=False)
+                ])
+            else:
+                sel = np.random.default_rng(42).choice(X.shape[0], size=sample_size, replace=False)
+            X = X[sel]
+            y = y[sel]
+            _log(f"NN: użyto {X.shape[0]} patchy do treningu (zbalansowane)")
+
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42)
         _log(f"Przygotowano dane NN: {X_train.shape[0]} próbek treningowych, {X_test.shape[0]} próbek testowych")
@@ -350,17 +374,20 @@ class RetinaVesselDetector:
         y_test_t = torch.tensor(y_test).to(self.device)
 
         dataset = TensorDataset(X_train_t, y_train_t)
-        dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
         pos = float(y_train.sum())
         neg = float(y_train.size - pos)
-        pos_weight = torch.tensor([neg / max(pos, 1.0)], device=self.device)
+        raw_weight = neg / max(pos, 1.0)
+        weight_factor = self.nn_pos_weight.get()
+        pos_weight_value = max(1.0, min(raw_weight * weight_factor, 10.0))
+        pos_weight = torch.tensor([pos_weight_value], device=self.device)
+        _log(f"pos_weight={pos_weight.item():.2f}, raw_weight={raw_weight:.2f}, factor={weight_factor:.1f}, pos={pos:.1f}, neg={neg:.1f}")
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         optimizer = optim.Adam(self.model_nn.parameters(), lr=1e-3)
 
-        epochs = 10
         self.model_nn.train()
-        _log("Rozpoczynam trening NN")
+        _log(f"Rozpoczynam trening NN: speed={speed}, epochs={epochs}, batch_size={batch_size}")
         batch_count = len(dataloader)
         for epoch in range(epochs):
             epoch_loss = 0.0
@@ -371,7 +398,7 @@ class RetinaVesselDetector:
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
-                if batch_idx % 50 == 0:
+                if batch_idx % 20 == 0:
                     _log(f"Epoch {epoch + 1}/{epochs}, batch {batch_idx}/{batch_count}: loss={loss.item():.4f}")
             _log(f"Epoch {epoch + 1}/{epochs}: loss={epoch_loss:.4f}")
 
@@ -395,7 +422,8 @@ class RetinaVesselDetector:
 
         h, w = self.image.shape
         patch_size = 64
-        stride = patch_size // 2
+        speed = self.nn_speed.get()
+        stride = 32 if speed == 1 else 40 if speed == 2 else 48 if speed == 3 else 56 if speed == 4 else 64
         self.model_nn.eval()
         prob_sum = np.zeros((h, w), dtype=np.float32)
         count = np.zeros((h, w), dtype=np.float32)
@@ -408,7 +436,7 @@ class RetinaVesselDetector:
 
         ys = positions(h)
         xs = positions(w)
-        _log(f"Rozpoczynam predykcję NN dla {len(ys) * len(xs)} patchy")
+        _log(f"Rozpoczynam predykcję NN dla {len(ys) * len(xs)} patchy, stride={stride}")
         with torch.no_grad():
             count_log = 0
             for i in ys:
