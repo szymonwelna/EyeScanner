@@ -137,7 +137,6 @@ class UNet(nn.Module):
         d3 = self.dec3(d4) + e3
         d2 = self.dec2(d3) + e2
         d1 = self.dec1(d2) + e1
-        # Returns logits; apply sigmoid externally when needed.
         return self.final(d1)
 
 class RetinaVesselDetector:
@@ -182,6 +181,10 @@ class RetinaVesselDetector:
 
         self.predict_ml_btn = tk.Button(root, text="Predykcja z ML", command=self.predict_ml)
         self.predict_ml_btn.pack()
+
+        self.ml_accuracy = tk.IntVar(value=1)
+        self.ml_accuracy_scale = tk.Scale(root, label="Dokładność ML (1=wysoka, 5=niska)", from_=1, to=5, orient=tk.HORIZONTAL, variable=self.ml_accuracy, length=260)
+        self.ml_accuracy_scale.pack()
 
         self.train_nn_btn = tk.Button(root, text="Trenuj sieć neuronową", command=self.train_nn)
         self.train_nn_btn.pack()
@@ -240,8 +243,7 @@ class RetinaVesselDetector:
         kernel = np.ones((3,3), np.uint8)
         self.predicted_mask = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
         self.predicted_mask = (self.predicted_mask > 0).astype(np.uint8)
-
-        # Wizualizacja
+        _log("Zastosowano operacje morfologiczne")
         self.visualize()
 
     def visualize(self):
@@ -263,6 +265,7 @@ class RetinaVesselDetector:
         self.canvas = FigureCanvasTkAgg(fig, master=self.root)
         self.canvas.get_tk_widget().pack()
         self.canvas.draw()
+        _log("Wynik został zwizualizowany")
 
     def analyze_results(self):
         if self.mask is None or self.predicted_mask is None:
@@ -272,6 +275,7 @@ class RetinaVesselDetector:
             messagebox.showerror("Błąd", "Maska i predykcja mają różne rozmiary")
             return
 
+        _log("Rozpoczynam analizę wyników")
         y_true = self.mask.flatten()
         y_pred = self.predicted_mask.flatten()
         tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
@@ -279,6 +283,7 @@ class RetinaVesselDetector:
         sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
         specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
         mean_metric = (sensitivity + specificity) / 2
+        _log(f"Accuracy={accuracy:.4f}, Sensitivity={sensitivity:.4f}, Specificity={specificity:.4f}, Średnia={mean_metric:.4f}")
 
         result = (f"Accuracy: {accuracy:.4f}\nSensitivity: {sensitivity:.4f}\n"
                   f"Specificity: {specificity:.4f}\nŚrednia: {mean_metric:.4f}")
@@ -288,12 +293,12 @@ class RetinaVesselDetector:
         h, w = image.shape
         c = patch_size // 2
         rng = np.random.default_rng(42)
-        # Valid centre coordinates (full patch fits inside the image).
         ys, xs = np.mgrid[c:h - c, c:w - c]
         centres = mask[c:h - c, c:w - c]
         pos_idx = np.flatnonzero(centres.ravel() == 1)
         neg_idx = np.flatnonzero(centres.ravel() == 0)
         if pos_idx.size == 0 or neg_idx.size == 0:
+            _log("Brak danych pozytywnych lub negatywnych do przygotowania danych treningowych")
             return np.empty((0, 8)), np.empty((0,), dtype=np.int64)
         n = min(samples_per_class, pos_idx.size, neg_idx.size)
         pos_sel = rng.choice(pos_idx, size=n, replace=False)
@@ -302,15 +307,14 @@ class RetinaVesselDetector:
         ys_sel = ys.ravel()[sel]
         xs_sel = xs.ravel()[sel]
 
-        # Build the patches for the selected centres only.
         patches = np.stack([
             image[y - c:y + c + 1, x - c:x + c + 1]
             for y, x in zip(ys_sel, xs_sel)
         ])
         labels = np.concatenate([np.ones(n, dtype=np.int64),
                                  np.zeros(n, dtype=np.int64)])
-        # Drop uniform patches.
         keep = patches.reshape(patches.shape[0], -1).var(axis=1) > 0
+        _log(f"Wybrano {keep.sum()} patchy treningowe z {patches.shape[0]} wycinków")
         feats = _compute_features_batch(patches[keep])
         return feats, labels[keep]
 
@@ -319,23 +323,24 @@ class RetinaVesselDetector:
             messagebox.showerror("Błąd", "Załaduj obraz i maskę")
             return
 
-        # Przygotuj dane treningowe
+        _log("Rozpoczynam przygotowanie danych ML")
         self.features, self.labels = self.prepare_training_data(self.image, self.mask)
+        _log(f"Przygotowano dane: {self.features.shape[0]} próbek, {self.features.shape[1]} cech")
 
-        # Undersampling dla niezrównoważonych danych
         rus = RandomUnderSampler(random_state=42)
         X_res, y_res = rus.fit_resample(self.features, self.labels)
+        _log(f"Undersampling: {X_res.shape[0]} próbek po zrównoważeniu")
 
-        # Podziel na train/test
         X_train, X_test, y_train, y_test = train_test_split(X_res, y_res, test_size=0.2, random_state=42)
+        _log(f"Podział train/test: {X_train.shape[0]}/{X_test.shape[0]}")
 
-        # Trenuj SVM
         self.classifier = SVC(kernel='rbf', C=1.0, random_state=42)
+        _log("Rozpoczynam trening SVM")
         self.classifier.fit(X_train, y_train)
 
-        # Test na hold-out
         y_pred = self.classifier.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
+        _log(f"Trening SVM zakończony, accuracy hold-out: {acc:.4f}")
         messagebox.showinfo("Trening zakończony", f"Accuracy na hold-out: {acc:.4f}")
 
     def predict_ml(self):
@@ -343,22 +348,29 @@ class RetinaVesselDetector:
             messagebox.showerror("Błąd", "Najpierw trenować klasyfikator")
             return
 
+        step = self.ml_accuracy.get()
         h, w = self.image.shape
         patch_size = 5
         c = patch_size // 2
         self.predicted_mask = np.zeros((h, w), dtype=np.uint8)
 
-        patches = _all_patches(self.image, patch_size)  # (N, P, P) view
-        inner_h, inner_w = h - 2 * c, w - 2 * c
-        # Chunk through patches so we don't allocate a giant float64 array.
-        preds = np.zeros(patches.shape[0], dtype=np.uint8)
-        chunk = 200_000
-        for start in range(0, patches.shape[0], chunk):
-            block = patches[start:start + chunk]
-            feats = _compute_features_batch(block)
-            preds[start:start + chunk] = self.classifier.predict(feats).astype(np.uint8)
-        self.predicted_mask[c:c + inner_h, c:c + inner_w] = preds.reshape(inner_h, inner_w)
+        positions_h = list(range(c, h - c, step))
+        positions_w = list(range(c, w - c, step))
+        total = len(positions_h) * len(positions_w)
+        _log(f"Rozpoczynam predykcję ML dla {total} pozycji przy kroku {step}")
 
+        idx = 0
+        for y in positions_h:
+            row_patches = [self.image[y - c:y + c + 1, x - c:x + c + 1] for x in positions_w]
+            feats = _compute_features_batch(np.stack(row_patches))
+            preds = self.classifier.predict(feats).astype(np.uint8)
+            for x, pred in zip(positions_w, preds):
+                self.predicted_mask[y - c:y + c + 1, x - c:x + c + 1] = pred
+            idx += len(positions_w)
+            if idx % 1000 == 0:
+                _log(f"Predykcja ML: przetworzono {idx}/{total} pozycji")
+
+        _log("Predykcja ML zakończona")
         self.visualize()
 
     def train_nn(self):
@@ -380,6 +392,7 @@ class RetinaVesselDetector:
 
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42)
+        _log(f"Przygotowano dane NN: {X_train.shape[0]} próbek treningowych, {X_test.shape[0]} próbek testowych")
 
         X_train_t = torch.tensor(X_train).to(self.device)
         y_train_t = torch.tensor(y_train).to(self.device)
@@ -401,16 +414,21 @@ class RetinaVesselDetector:
 
         epochs = 20
         self.model_nn.train()
+        _log("Rozpoczynam trening NN")
+        batch_count = len(dataloader)
         for epoch in range(epochs):
-            for inputs, labels in dataloader:
+            epoch_loss = 0.0
+            for batch_idx, (inputs, labels) in enumerate(dataloader, start=1):
                 optimizer.zero_grad()
                 outputs = self.model_nn(inputs)
                 loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
+                epoch_loss += loss.item()
+                if batch_idx % 50 == 0:
+                    _log(f"Epoch {epoch + 1}/{epochs}, batch {batch_idx}/{batch_count}: loss={loss.item():.4f}")
+            _log(f"Epoch {epoch + 1}/{epochs}: loss={epoch_loss:.4f}")
 
-        # Hold-out evaluation — batched to avoid materialising preds for the
-        # whole test set in one shot.
         self.model_nn.eval()
         correct = 0
         total = 0
@@ -421,6 +439,7 @@ class RetinaVesselDetector:
                 correct += (preds == y_test_t[k:k + 8]).float().sum().item()
                 total += preds.numel()
         acc = correct / max(total, 1)
+        _log(f"Trening NN zakończony, accuracy hold-out: {acc:.4f}")
         messagebox.showinfo("Trening NN zakończony", f"Accuracy na hold-out: {acc:.4f}")
 
     def predict_nn(self):
@@ -435,28 +454,33 @@ class RetinaVesselDetector:
         prob_sum = np.zeros((h, w), dtype=np.float32)
         count = np.zeros((h, w), dtype=np.float32)
 
-        # Walk patches with stride; clamp the final patch flush to the edge so
-        # we cover the whole image when (h, w) aren't multiples of stride.
         def positions(length):
             steps = list(range(0, max(length - patch_size, 0) + 1, stride))
             if not steps or steps[-1] + patch_size < length:
                 steps.append(max(length - patch_size, 0))
             return steps
 
+        ys = positions(h)
+        xs = positions(w)
+        _log(f"Rozpoczynam predykcję NN dla {len(ys) * len(xs)} patchy")
         with torch.no_grad():
-            for i in positions(h):
-                for j in positions(w):
+            count_log = 0
+            for i in ys:
+                for j in xs:
                     patch = self.image[i:i + patch_size, j:j + patch_size]
                     if patch.shape != (patch_size, patch_size):
                         continue
-                    t = (torch.tensor(patch, dtype=torch.float32) / 255.0
-                         ).unsqueeze(0).unsqueeze(0).to(self.device)
+                    t = (torch.tensor(patch, dtype=torch.float32) / 255.0).unsqueeze(0).unsqueeze(0).to(self.device)
                     prob = torch.sigmoid(self.model_nn(t)).squeeze().cpu().numpy()
                     prob_sum[i:i + patch_size, j:j + patch_size] += prob
                     count[i:i + patch_size, j:j + patch_size] += 1.0
+                    count_log += 1
+                    if count_log % 20 == 0:
+                        _log(f"Predykcja NN: przetworzono {count_log} patchy")
 
         avg = np.divide(prob_sum, count, out=np.zeros_like(prob_sum), where=count > 0)
         self.predicted_mask = (avg > 0.5).astype(np.uint8)
+        _log("Predykcja NN zakończona")
         self.visualize()
 
 if __name__ == "__main__":
