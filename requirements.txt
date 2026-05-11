@@ -1,0 +1,9 @@
+opencv-python
+numpy
+matplotlib
+scikit-learn
+imbalanced-learn
+scikit-image
+torch
+torchvision
+torchaudio
